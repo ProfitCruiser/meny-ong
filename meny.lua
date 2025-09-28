@@ -755,7 +755,8 @@ local ESP={
     ColorIntensity=1,
     BoxESP=false,
     BoxThickness=2,
-    NameHealth=false,
+    NameTag=false,
+    HealthTag=false,
     TracerLines=false,
     TracerFrom="Bottom",
     TracerThickness=1.5,
@@ -1066,6 +1067,18 @@ local function drawingColor(col)
     return Color3.new(col.R, col.G, col.B)
 end
 
+local function lerpColor3(a, b, t)
+    t = math.clamp(t or 0, 0, 1)
+    return Color3.new(
+        a.R + (b.R - a.R) * t,
+        a.G + (b.G - a.G) * t,
+        a.B + (b.B - a.B) * t
+    )
+end
+
+local HEALTH_LOW_COLOR = Color3.fromRGB(235, 85, 85)
+local HEALTH_HIGH_COLOR = Color3.fromRGB(80, 210, 140)
+
 local espVisuals = {}
 
 local function ensureVisual(p)
@@ -1082,16 +1095,34 @@ local function ensureVisual(p)
         return sq
     end)
     if not ok then entry.Box = nil end
-    ok, entry.Text = pcall(function()
+    ok, entry.NameText = pcall(function()
         local txt = Drawing.new("Text")
         txt.Visible = false
-        txt.Size = 16
+        txt.Size = 13
         txt.Center = true
         txt.Outline = true
         txt.Color = Color3.new(1,1,1)
+        txt.OutlineColor = Color3.new(0,0,0)
+        if Drawing.Fonts and Drawing.Fonts.UI then
+            txt.Font = Drawing.Fonts.UI
+        end
         return txt
     end)
-    if not ok then entry.Text = nil end
+    if not ok then entry.NameText = nil end
+    ok, entry.HealthText = pcall(function()
+        local txt = Drawing.new("Text")
+        txt.Visible = false
+        txt.Size = 12
+        txt.Center = true
+        txt.Outline = true
+        txt.Color = Color3.new(1,1,1)
+        txt.OutlineColor = Color3.new(0,0,0)
+        if Drawing.Fonts and Drawing.Fonts.UI then
+            txt.Font = Drawing.Fonts.UI
+        end
+        return txt
+    end)
+    if not ok then entry.HealthText = nil end
     ok, entry.Tracer = pcall(function()
         local line = Drawing.new("Line")
         line.Visible = false
@@ -1106,7 +1137,8 @@ end
 local function hideVisual(entry)
     if not entry then return end
     if entry.Box then entry.Box.Visible = false end
-    if entry.Text then entry.Text.Visible = false end
+    if entry.NameText then entry.NameText.Visible = false end
+    if entry.HealthText then entry.HealthText.Visible = false end
     if entry.Tracer then entry.Tracer.Visible = false end
 end
 
@@ -1114,7 +1146,8 @@ local function removeVisual(p)
     local entry = espVisuals[p]
     if not entry then return end
     if entry.Box then entry.Box:Remove() end
-    if entry.Text then entry.Text:Remove() end
+    if entry.NameText then entry.NameText:Remove() end
+    if entry.HealthText then entry.HealthText:Remove() end
     if entry.Tracer then entry.Tracer:Remove() end
     espVisuals[p] = nil
 end
@@ -1149,7 +1182,7 @@ local function espTick(p)
         h.FillColor=col; h.OutlineColor=col
     end
 
-    local needs2D = (ESP.BoxESP or ESP.NameHealth or ESP.TracerLines)
+    local needs2D = (ESP.BoxESP or ESP.NameTag or ESP.HealthTag or ESP.TracerLines)
     if not needs2D then
         hideVisual(espVisuals[p])
         return
@@ -1168,8 +1201,8 @@ local function espTick(p)
         entry.Tracer.Thickness = math.clamp(ESP.TracerThickness or 1.5, 0.5, 6)
         entry.Tracer.Color = tinted
     end
-    if entry.Text then
-        entry.Text.Color = tinted
+    if entry.NameText then
+        entry.NameText.Color = tinted
     end
 
     local success, bboxCFrame, bboxSize = pcall(function()
@@ -1206,7 +1239,10 @@ local function espTick(p)
     local humanoid = c:FindFirstChildWhichIsA("Humanoid")
     local hp = humanoid and humanoid.Health or 0
     local maxHp = humanoid and humanoid.MaxHealth or 100
-    local nameTag = (p.DisplayName and trim(p.DisplayName) ~= "") and p.DisplayName or p.Name
+    local hpPercent = maxHp > 0 and math.clamp(math.floor((hp / maxHp) * 100 + 0.5), 0, 999) or 0
+    local hpRounded = math.clamp(math.floor(hp + 0.5), 0, 9999)
+    local nameTag = trim((p.DisplayName and trim(p.DisplayName) ~= "") and p.DisplayName or p.Name)
+    local centerX = minX + width * 0.5
 
     if entry.Box and ESP.BoxESP then
         entry.Box.Position = Vector2.new(minX, minY)
@@ -1214,11 +1250,19 @@ local function espTick(p)
         entry.Box.Visible = true
     end
 
-    if entry.Text and ESP.NameHealth then
-        local percent = maxHp > 0 and math.floor((hp / maxHp) * 100 + 0.5) or 0
-        entry.Text.Text = string.format("%s - %d HP (%d%%)", nameTag, math.floor(hp + 0.5), percent)
-        entry.Text.Position = Vector2.new(minX + width * 0.5, minY - 18)
-        entry.Text.Visible = true
+    if entry.NameText and ESP.NameTag then
+        entry.NameText.Text = nameTag
+        entry.NameText.Position = Vector2.new(centerX, minY - 18)
+        entry.NameText.Visible = true
+    end
+
+    if entry.HealthText and ESP.HealthTag then
+        local healthColor = lerpColor3(HEALTH_LOW_COLOR, HEALTH_HIGH_COLOR, (maxHp > 0) and math.clamp(hp / maxHp, 0, 1) or 0)
+        entry.HealthText.Color = drawingColor(healthColor)
+        entry.HealthText.Text = string.format("%d HP · %d%%", hpRounded, hpPercent)
+        local baseY = ESP.NameTag and entry.NameText and entry.NameText.Visible and (minY - 6) or (minY - 14)
+        entry.HealthText.Position = Vector2.new(centerX, baseY)
+        entry.HealthText.Visible = true
     end
 
     if entry.Tracer and ESP.TracerLines then
@@ -1230,7 +1274,7 @@ local function espTick(p)
             anchor = Vector2.new(viewport.X * 0.5, viewport.Y)
         end
         entry.Tracer.From = anchor
-        entry.Tracer.To = Vector2.new(minX + width * 0.5, maxY)
+        entry.Tracer.To = Vector2.new(centerX, maxY)
         entry.Tracer.Visible = true
     end
 end
@@ -1348,7 +1392,8 @@ mkCycle(ESPP, "Friendly Highlight", ESPColorPresets, ESP.FriendColor, function(c
 mkCycle(ESPP, "Neutral Highlight", ESPColorPresets, ESP.NeutralColor, function(col) ESP.NeutralColor = col end, "Pick the tone shown for players with no team alignment.")
 local boxToggle = mkToggle(ESPP,"Box ESP (2D)", ESP.BoxESP, function(v) ESP.BoxESP=v end, "Draws flat boxes around visible players using the ESP colors.")
 local boxThickness = mkSlider(ESPP,"Box Line Thickness", 1, 6, ESP.BoxThickness, function(x) ESP.BoxThickness=math.floor(x+0.5) end,"px", "Controls how thick the 2D box outline appears.")
-local nameToggle = mkToggle(ESPP,"Name + Health Tag", ESP.NameHealth, function(v) ESP.NameHealth=v end, "Displays each player's name and HP above their ESP box.")
+local nameToggle = mkToggle(ESPP,"Player Name Tag", ESP.NameTag, function(v) ESP.NameTag=v end, "Shows a compact name label above each visible player.")
+local healthToggle = mkToggle(ESPP,"Health Tag", ESP.HealthTag, function(v) ESP.HealthTag=v end, "Adds a slimmer health readout with current HP and percent.")
 local tracerToggle = mkToggle(ESPP,"Tracer Lines", ESP.TracerLines, function(v) ESP.TracerLines=v end, "Draws a line from your screen to each highlighted target.")
 local tracerThickness = mkSlider(ESPP,"Tracer Thickness", 0.5, 4, ESP.TracerThickness, function(x) ESP.TracerThickness=x end,"px", "Adjusts the width of each tracer line.")
 local tracerAnchor = mkCycle(ESPP,"Tracer Anchor", {
@@ -1356,7 +1401,7 @@ local tracerAnchor = mkCycle(ESPP,"Tracer Anchor", {
     {label = "Crosshair", value = "Crosshair"},
 }, ESP.TracerFrom or "Bottom", function(val) ESP.TracerFrom = val end, "Choose where tracers originate on your screen.")
 if not drawingAvailable then
-    for _,control in ipairs({boxToggle, boxThickness, nameToggle, tracerToggle, tracerThickness, tracerAnchor}) do
+    for _,control in ipairs({boxToggle, boxThickness, nameToggle, healthToggle, tracerToggle, tracerThickness, tracerAnchor}) do
         if control and control.Row then
             setInteractable(control.Row, false)
         end
