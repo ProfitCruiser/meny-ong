@@ -19,8 +19,9 @@ local Camera      = workspace.CurrentCamera
 
 local trackedPlayers = {}
 
--- forward-declare Root so click handlers can access it before it's created
+-- forward-declare Root and AA_GUI so early callbacks can reference them safely
 local Root
+local AA_GUI
 
 pcall(function()
     GuiService.AutoSelectGuiEnabled = false
@@ -1405,7 +1406,7 @@ local Cross={
 
 --==================== RUNTIME / DRAW ====================--
 -- FOV ring
-local AA_GUI=Instance.new("ScreenGui"); AA_GUI.Name="PC_FOV"; AA_GUI.IgnoreGuiInset=true; AA_GUI.ResetOnSpawn=false; AA_GUI.DisplayOrder=45; AA_GUI.Parent=safeParent()
+AA_GUI=Instance.new("ScreenGui"); AA_GUI.Name="PC_FOV"; AA_GUI.IgnoreGuiInset=true; AA_GUI.ResetOnSpawn=false; AA_GUI.DisplayOrder=45; AA_GUI.Parent=safeParent()
 local FOV=Instance.new("Frame", AA_GUI); FOV.AnchorPoint=Vector2.new(0.5,0.5); FOV.Position=UDim2.fromScale(0.5,0.5); FOV.BackgroundTransparency=1; FOV.Visible=false
 local FStroke=Instance.new("UIStroke", FOV); FStroke.Thickness=2; FStroke.Transparency=0.15; FStroke.Color=Color3.fromRGB(0,255,140); corner(FOV, math.huge)
 
