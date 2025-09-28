@@ -753,6 +753,12 @@ local ESP={
     OutlineTransparency=0,
     ThroughWalls=true,
     ColorIntensity=1,
+    BoxESP=false,
+    BoxThickness=2,
+    NameHealth=false,
+    TracerLines=false,
+    TracerFrom="Bottom",
+    TracerThickness=1.5,
 }
 local Cross={
     Enabled=false,
@@ -1044,30 +1050,214 @@ local function tintESPColor(color)
     s = math.clamp(s * satScale, 0, 1)
     return Color3.fromHSV(h, s, v)
 end
+
+local drawingAvailable do
+    local ok = pcall(function()
+        local test = Drawing and Drawing.new
+        if not test then error("no drawing") end
+        local line = Drawing.new("Line")
+        line.Visible = false
+        line:Remove()
+    end)
+    drawingAvailable = ok
+end
+
+local function drawingColor(col)
+    return Color3.new(col.R, col.G, col.B)
+end
+
+local espVisuals = {}
+
+local function ensureVisual(p)
+    if not drawingAvailable then return nil end
+    local entry = espVisuals[p]
+    if entry then return entry end
+    entry = {}
+    local ok
+    ok, entry.Box = pcall(function()
+        local sq = Drawing.new("Square")
+        sq.Visible = false
+        sq.Filled = false
+        sq.Thickness = ESP.BoxThickness or 2
+        return sq
+    end)
+    if not ok then entry.Box = nil end
+    ok, entry.Text = pcall(function()
+        local txt = Drawing.new("Text")
+        txt.Visible = false
+        txt.Size = 16
+        txt.Center = true
+        txt.Outline = true
+        txt.Color = Color3.new(1,1,1)
+        return txt
+    end)
+    if not ok then entry.Text = nil end
+    ok, entry.Tracer = pcall(function()
+        local line = Drawing.new("Line")
+        line.Visible = false
+        line.Thickness = ESP.TracerThickness or 1.5
+        return line
+    end)
+    if not ok then entry.Tracer = nil end
+    espVisuals[p] = entry
+    return entry
+end
+
+local function hideVisual(entry)
+    if not entry then return end
+    if entry.Box then entry.Box.Visible = false end
+    if entry.Text then entry.Text.Visible = false end
+    if entry.Tracer then entry.Tracer.Visible = false end
+end
+
+local function removeVisual(p)
+    local entry = espVisuals[p]
+    if not entry then return end
+    if entry.Box then entry.Box:Remove() end
+    if entry.Text then entry.Text:Remove() end
+    if entry.Tracer then entry.Tracer:Remove() end
+    espVisuals[p] = nil
+end
 local function espTick(p)
     if p==LocalPlayer then return end
-    local c=p.Character; if not c then return end
+    local c=p.Character
+    if not c then
+        hideVisual(espVisuals[p])
+        return
+    end
     local h=hl(c); local show=ESP.Enabled
     if show and ESP.EnemiesOnly then local e=isEnemyESP(p); show=(e==true) end
     if show and ESP.UseDistance then show=distTo(c)<=ESP.MaxDistance end
-    h.Enabled=show; if not show then return end
+    h.Enabled=show
+    if not show then
+        hideVisual(espVisuals[p])
+        return
+    end
     h.DepthMode = ESP.ThroughWalls and Enum.HighlightDepthMode.AlwaysOnTop or Enum.HighlightDepthMode.Occluded
     h.FillTransparency = math.clamp(ESP.FillTransparency, 0, 1)
     h.OutlineTransparency = math.clamp(ESP.OutlineTransparency, 0, 1)
     local e=isEnemyESP(p)
+    local col
     if e==true then
-        local col = tintESPColor(ESP.EnemyColor)
+        col = tintESPColor(ESP.EnemyColor)
         h.FillColor=col; h.OutlineColor=col
     elseif e==false then
-        local col = tintESPColor(ESP.FriendColor)
+        col = tintESPColor(ESP.FriendColor)
         h.FillColor=col; h.OutlineColor=col
     else
-        local col = tintESPColor(ESP.NeutralColor)
+        col = tintESPColor(ESP.NeutralColor)
         h.FillColor=col; h.OutlineColor=col
     end
+
+    local needs2D = (ESP.BoxESP or ESP.NameHealth or ESP.TracerLines)
+    if not needs2D then
+        hideVisual(espVisuals[p])
+        return
+    end
+
+    local entry = ensureVisual(p)
+    if not entry then return end
+    hideVisual(entry)
+
+    local tinted = drawingColor(col)
+    if entry.Box then
+        entry.Box.Thickness = math.clamp(ESP.BoxThickness or 2, 1, 6)
+        entry.Box.Color = tinted
+    end
+    if entry.Tracer then
+        entry.Tracer.Thickness = math.clamp(ESP.TracerThickness or 1.5, 0.5, 6)
+        entry.Tracer.Color = tinted
+    end
+    if entry.Text then
+        entry.Text.Color = tinted
+    end
+
+    local success, bboxCFrame, bboxSize = pcall(function()
+        return c:GetBoundingBox()
+    end)
+    if not success then return end
+
+    local half = bboxSize * 0.5
+    local minX, minY = math.huge, math.huge
+    local maxX, maxY = -math.huge, -math.huge
+    local onScreen = false
+    for x=-1,1,2 do
+        for y=-1,1,2 do
+            for z=-1,1,2 do
+                local worldPos = bboxCFrame * Vector3.new(half.X * x, half.Y * y, half.Z * z)
+                local screenPos, visible = Camera:WorldToViewportPoint(worldPos)
+                if visible and screenPos.Z > 0 then
+                    onScreen = true
+                    minX = math.min(minX, screenPos.X)
+                    minY = math.min(minY, screenPos.Y)
+                    maxX = math.max(maxX, screenPos.X)
+                    maxY = math.max(maxY, screenPos.Y)
+                end
+            end
+        end
+    end
+
+    if not onScreen then return end
+
+    local width = math.max(0, maxX - minX)
+    local height = math.max(0, maxY - minY)
+    if width < 2 or height < 2 then return end
+
+    local humanoid = c:FindFirstChildWhichIsA("Humanoid")
+    local hp = humanoid and humanoid.Health or 0
+    local maxHp = humanoid and humanoid.MaxHealth or 100
+    local nameTag = (p.DisplayName and trim(p.DisplayName) ~= "") and p.DisplayName or p.Name
+
+    if entry.Box and ESP.BoxESP then
+        entry.Box.Position = Vector2.new(minX, minY)
+        entry.Box.Size = Vector2.new(width, height)
+        entry.Box.Visible = true
+    end
+
+    if entry.Text and ESP.NameHealth then
+        local percent = maxHp > 0 and math.floor((hp / maxHp) * 100 + 0.5) or 0
+        entry.Text.Text = string.format("%s - %d HP (%d%%)", nameTag, math.floor(hp + 0.5), percent)
+        entry.Text.Position = Vector2.new(minX + width * 0.5, minY - 18)
+        entry.Text.Visible = true
+    end
+
+    if entry.Tracer and ESP.TracerLines then
+        local viewport = Camera.ViewportSize
+        local anchor
+        if tostring(ESP.TracerFrom) == "Crosshair" then
+            anchor = Vector2.new(viewport.X * 0.5, viewport.Y * 0.5)
+        else
+            anchor = Vector2.new(viewport.X * 0.5, viewport.Y)
+        end
+        entry.Tracer.From = anchor
+        entry.Tracer.To = Vector2.new(minX + width * 0.5, maxY)
+        entry.Tracer.Visible = true
+    end
 end
-RunService.RenderStepped:Connect(function() for _,pl in ipairs(Players:GetPlayers()) do espTick(pl) end end)
-Players.PlayerAdded:Connect(function(p) p.CharacterAdded:Connect(function() task.wait(0.2); espTick(p) end) end)
+RunService.RenderStepped:Connect(function()
+    for _,pl in ipairs(Players:GetPlayers()) do
+        espTick(pl)
+    end
+end)
+Players.PlayerAdded:Connect(function(p)
+    p.CharacterAdded:Connect(function()
+        task.wait(0.2)
+        espTick(p)
+    end)
+    p.CharacterRemoving:Connect(function()
+        hideVisual(espVisuals[p])
+    end)
+end)
+Players.PlayerRemoving:Connect(function(p)
+    removeVisual(p)
+end)
+for _,pl in ipairs(Players:GetPlayers()) do
+    if pl ~= LocalPlayer then
+        pl.CharacterRemoving:Connect(function()
+            hideVisual(espVisuals[pl])
+        end)
+    end
+end
 
 --==================== PAGES & CONTROLS ====================--
 local AimbotP = newPage("Aimbot")
@@ -1156,6 +1346,22 @@ mkSlider(ESPP,"Color Intensity", 0.4, 1.6, ESP.ColorIntensity, function(x) ESP.C
 mkCycle(ESPP, "Enemy Highlight", ESPColorPresets, ESP.EnemyColor, function(col) ESP.EnemyColor = col end, "Choose the glow color used when enemies are highlighted.")
 mkCycle(ESPP, "Friendly Highlight", ESPColorPresets, ESP.FriendColor, function(col) ESP.FriendColor = col end, "Select the highlight tint for teammates and allies.")
 mkCycle(ESPP, "Neutral Highlight", ESPColorPresets, ESP.NeutralColor, function(col) ESP.NeutralColor = col end, "Pick the tone shown for players with no team alignment.")
+local boxToggle = mkToggle(ESPP,"Box ESP (2D)", ESP.BoxESP, function(v) ESP.BoxESP=v end, "Draws flat boxes around visible players using the ESP colors.")
+local boxThickness = mkSlider(ESPP,"Box Line Thickness", 1, 6, ESP.BoxThickness, function(x) ESP.BoxThickness=math.floor(x+0.5) end,"px", "Controls how thick the 2D box outline appears.")
+local nameToggle = mkToggle(ESPP,"Name + Health Tag", ESP.NameHealth, function(v) ESP.NameHealth=v end, "Displays each player's name and HP above their ESP box.")
+local tracerToggle = mkToggle(ESPP,"Tracer Lines", ESP.TracerLines, function(v) ESP.TracerLines=v end, "Draws a line from your screen to each highlighted target.")
+local tracerThickness = mkSlider(ESPP,"Tracer Thickness", 0.5, 4, ESP.TracerThickness, function(x) ESP.TracerThickness=x end,"px", "Adjusts the width of each tracer line.")
+local tracerAnchor = mkCycle(ESPP,"Tracer Anchor", {
+    {label = "Screen Bottom", value = "Bottom"},
+    {label = "Crosshair", value = "Crosshair"},
+}, ESP.TracerFrom or "Bottom", function(val) ESP.TracerFrom = val end, "Choose where tracers originate on your screen.")
+if not drawingAvailable then
+    for _,control in ipairs({boxToggle, boxThickness, nameToggle, tracerToggle, tracerThickness, tracerAnchor}) do
+        if control and control.Row then
+            setInteractable(control.Row, false)
+        end
+    end
+end
 
 -- Visuals
 local crossT = mkToggle(VisualP,"Crosshair", Cross.Enabled, function(v) Cross.Enabled=v; updCross() end, "Shows or hides the custom crosshair overlay.")
@@ -1191,6 +1397,11 @@ RunService.RenderStepped:Connect(function()
     local on=Cross.CenterDot; setInteractable(dotS.Row,on); setInteractable(dotO.Row,on)
     if rainbowSpeed then setInteractable(rainbowSpeed.Row, Cross.Rainbow) end
     if pulseSpeed then setInteractable(pulseSpeed.Row, Cross.Pulse) end
+    if drawingAvailable then
+        if boxThickness then setInteractable(boxThickness.Row, ESP.BoxESP) end
+        if tracerThickness then setInteractable(tracerThickness.Row, ESP.TracerLines) end
+        if tracerAnchor and tracerAnchor.Row then setInteractable(tracerAnchor.Row, ESP.TracerLines) end
+    end
 end)
 
 -- Misc
