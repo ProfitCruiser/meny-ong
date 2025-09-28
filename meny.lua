@@ -753,6 +753,9 @@ local ESP={
     OutlineTransparency=0,
     ThroughWalls=true,
     ColorIntensity=1,
+    ShowSkeleton=false,
+    SkeletonOpacity=0.85,
+    SkeletonThickness=2.2,
 }
 local Cross={
     Enabled=false,
@@ -1020,6 +1023,151 @@ RunService.RenderStepped:Connect(function(dt)
 end)
 
 -- ESP (Highlight)
+local SkeletonGui = Instance.new("ScreenGui")
+SkeletonGui.Name = "PC_Skeleton"
+SkeletonGui.IgnoreGuiInset = true
+SkeletonGui.ResetOnSpawn = false
+SkeletonGui.DisplayOrder = 43
+SkeletonGui.Parent = safeParent()
+
+local skeletonCache = {}
+
+local skeletonConnections = {
+    R15 = {
+        {"Head", "UpperTorso"},
+        {"UpperTorso", "LowerTorso"},
+        {"UpperTorso", "LeftUpperArm"},
+        {"LeftUpperArm", "LeftLowerArm"},
+        {"LeftLowerArm", "LeftHand"},
+        {"UpperTorso", "RightUpperArm"},
+        {"RightUpperArm", "RightLowerArm"},
+        {"RightLowerArm", "RightHand"},
+        {"LowerTorso", "LeftUpperLeg"},
+        {"LeftUpperLeg", "LeftLowerLeg"},
+        {"LeftLowerLeg", "LeftFoot"},
+        {"LowerTorso", "RightUpperLeg"},
+        {"RightUpperLeg", "RightLowerLeg"},
+        {"RightLowerLeg", "RightFoot"},
+    },
+    R6 = {
+        {"Head", "Torso"},
+        {"Torso", "Left Arm"},
+        {"Torso", "Right Arm"},
+        {"Torso", "Left Leg"},
+        {"Torso", "Right Leg"},
+    }
+}
+
+local function destroySkeleton(p)
+    local entry = skeletonCache[p]
+    if entry then
+        if entry.Container then
+            entry.Container:Destroy()
+        end
+        skeletonCache[p] = nil
+    end
+end
+
+local function ensureSkeletonEntry(p, rig)
+    local entry = skeletonCache[p]
+    local connections = skeletonConnections[rig]
+    if not connections then return nil end
+    if not entry or entry.Rig ~= rig or #entry.Lines ~= #connections then
+        if entry and entry.Container then
+            entry.Container:Destroy()
+        end
+        entry = {
+            Rig = rig,
+            Container = Instance.new("Frame"),
+            Lines = {},
+        }
+        local container = entry.Container
+        container.Name = p.Name .. "_Skeleton"
+        container.BackgroundTransparency = 1
+        container.BorderSizePixel = 0
+        container.Size = UDim2.fromScale(1, 1)
+        container.ZIndex = 50
+        container.Parent = SkeletonGui
+        for i = 1, #connections do
+            local line = Instance.new("Frame")
+            line.Name = "Bone" .. i
+            line.BorderSizePixel = 0
+            line.BackgroundTransparency = 1
+            line.AnchorPoint = Vector2.new(0.5, 0.5)
+            line.Visible = false
+            line.ZIndex = 50
+            line.Parent = container
+            entry.Lines[i] = line
+        end
+        skeletonCache[p] = entry
+    end
+    return entry
+end
+
+local function updateSkeleton(p, character, color, shouldShow)
+    if not shouldShow or not character then
+        local entry = skeletonCache[p]
+        if entry then
+            entry.Container.Visible = false
+            for _, line in ipairs(entry.Lines) do
+                line.Visible = false
+            end
+        end
+        return
+    end
+
+    local rig = character:FindFirstChild("UpperTorso") and "R15" or "R6"
+    local connections = skeletonConnections[rig]
+    if not connections then return end
+
+    local entry = ensureSkeletonEntry(p, rig)
+    if not entry then return end
+
+    local thickness = math.max(1, ESP.SkeletonThickness or 2)
+    local opacity = math.clamp(ESP.SkeletonOpacity or 0.8, 0, 1)
+    local tone = color or Color3.new(1, 1, 1)
+    local drawn = 0
+
+    for i, conn in ipairs(connections) do
+        local a = character:FindFirstChild(conn[1])
+        local b = character:FindFirstChild(conn[2])
+        local line = entry.Lines[i]
+        if line and a and b and a:IsA("BasePart") and b:IsA("BasePart") then
+            local pa, onA = Camera:WorldToViewportPoint(a.Position)
+            local pb, onB = Camera:WorldToViewportPoint(b.Position)
+            if (onA or onB) and (pa.Z > 0 or pb.Z > 0) then
+                local x1, y1 = pa.X, pa.Y
+                local x2, y2 = pb.X, pb.Y
+                local dx, dy = x2 - x1, y2 - y1
+                local len = (dx * dx + dy * dy) ^ 0.5
+                if len > 2 then
+                    local midX, midY = (x1 + x2) * 0.5, (y1 + y2) * 0.5
+                    line.Size = UDim2.fromOffset(len, thickness)
+                    line.Position = UDim2.fromOffset(midX, midY)
+                    line.Rotation = math.deg(math.atan2(dy, dx))
+                    line.BackgroundTransparency = 1 - opacity
+                    line.BackgroundColor3 = tone
+                    line.Visible = true
+                    drawn = drawn + 1
+                else
+                    line.Visible = false
+                end
+            else
+                line.Visible = false
+            end
+        elseif line then
+            line.Visible = false
+        end
+    end
+
+    entry.Container.Visible = drawn > 0
+    if drawn == 0 then
+        for _, line in ipairs(entry.Lines) do
+            line.Visible = false
+        end
+    end
+end
+
 local function hl(model)
     local h = model:FindFirstChild("_HL_")
     if not h then
@@ -1046,28 +1194,69 @@ local function tintESPColor(color)
 end
 local function espTick(p)
     if p==LocalPlayer then return end
-    local c=p.Character; if not c then return end
-    local h=hl(c); local show=ESP.Enabled
-    if show and ESP.EnemiesOnly then local e=isEnemyESP(p); show=(e==true) end
-    if show and ESP.UseDistance then show=distTo(c)<=ESP.MaxDistance end
-    h.Enabled=show; if not show then return end
-    h.DepthMode = ESP.ThroughWalls and Enum.HighlightDepthMode.AlwaysOnTop or Enum.HighlightDepthMode.Occluded
-    h.FillTransparency = math.clamp(ESP.FillTransparency, 0, 1)
-    h.OutlineTransparency = math.clamp(ESP.OutlineTransparency, 0, 1)
-    local e=isEnemyESP(p)
-    if e==true then
-        local col = tintESPColor(ESP.EnemyColor)
-        h.FillColor=col; h.OutlineColor=col
-    elseif e==false then
-        local col = tintESPColor(ESP.FriendColor)
-        h.FillColor=col; h.OutlineColor=col
-    else
-        local col = tintESPColor(ESP.NeutralColor)
-        h.FillColor=col; h.OutlineColor=col
+    local c=p.Character
+    if not c then
+        updateSkeleton(p, nil, nil, false)
+        return
     end
+
+    local enemyState = isEnemyESP(p)
+    local passes = true
+    if ESP.EnemiesOnly then
+        passes = enemyState == true
+    end
+    if passes and ESP.UseDistance then
+        passes = distTo(c) <= (ESP.MaxDistance or math.huge)
+    end
+
+    local color
+    if enemyState == true then
+        color = tintESPColor(ESP.EnemyColor)
+    elseif enemyState == false then
+        color = tintESPColor(ESP.FriendColor)
+    else
+        color = tintESPColor(ESP.NeutralColor)
+    end
+
+    local highlight = hl(c)
+    local showHighlight = ESP.Enabled and passes
+    highlight.Enabled = showHighlight
+    if showHighlight then
+        highlight.DepthMode = ESP.ThroughWalls and Enum.HighlightDepthMode.AlwaysOnTop or Enum.HighlightDepthMode.Occluded
+        highlight.FillTransparency = math.clamp(ESP.FillTransparency, 0, 1)
+        highlight.OutlineTransparency = math.clamp(ESP.OutlineTransparency, 0, 1)
+        highlight.FillColor = color
+        highlight.OutlineColor = color
+    end
+
+    local showSkeleton = passes and ESP.ShowSkeleton
+    updateSkeleton(p, c, color, showSkeleton)
 end
 RunService.RenderStepped:Connect(function() for _,pl in ipairs(Players:GetPlayers()) do espTick(pl) end end)
-Players.PlayerAdded:Connect(function(p) p.CharacterAdded:Connect(function() task.wait(0.2); espTick(p) end) end)
+
+local function bindPlayer(p)
+    p.CharacterAdded:Connect(function()
+        task.wait(0.2)
+        espTick(p)
+    end)
+    if p ~= LocalPlayer then
+        p.CharacterRemoving:Connect(function()
+            destroySkeleton(p)
+        end)
+    end
+end
+
+for _,pl in ipairs(Players:GetPlayers()) do
+    bindPlayer(pl)
+end
+
+Players.PlayerAdded:Connect(function(p)
+    bindPlayer(p)
+end)
+
+Players.PlayerRemoving:Connect(function(p)
+    destroySkeleton(p)
+end)
 
 --==================== PAGES & CONTROLS ====================--
 local AimbotP = newPage("Aimbot")
@@ -1156,6 +1345,15 @@ mkSlider(ESPP,"Color Intensity", 0.4, 1.6, ESP.ColorIntensity, function(x) ESP.C
 mkCycle(ESPP, "Enemy Highlight", ESPColorPresets, ESP.EnemyColor, function(col) ESP.EnemyColor = col end, "Choose the glow color used when enemies are highlighted.")
 mkCycle(ESPP, "Friendly Highlight", ESPColorPresets, ESP.FriendColor, function(col) ESP.FriendColor = col end, "Select the highlight tint for teammates and allies.")
 mkCycle(ESPP, "Neutral Highlight", ESPColorPresets, ESP.NeutralColor, function(col) ESP.NeutralColor = col end, "Pick the tone shown for players with no team alignment.")
+local skeletonToggle = mkToggle(ESPP,"Show Skeleton Overlay", ESP.ShowSkeleton, function(v) ESP.ShowSkeleton=v end, "Draws limb lines so each character is outlined as a skeleton.")
+local skeletonOpacity = mkSlider(ESPP,"Skeleton Opacity", 0.2, 1, ESP.SkeletonOpacity, function(x) ESP.SkeletonOpacity=x end,nil, "Controls how visible the skeleton lines appear.")
+local skeletonThickness = mkSlider(ESPP,"Skeleton Thickness", 1, 6, ESP.SkeletonThickness, function(x) ESP.SkeletonThickness=x end,"px", "Sets how thick each skeleton bone line is rendered.")
+
+RunService.RenderStepped:Connect(function()
+    local on = ESP.ShowSkeleton
+    if skeletonOpacity and skeletonOpacity.Row then setInteractable(skeletonOpacity.Row, on) end
+    if skeletonThickness and skeletonThickness.Row then setInteractable(skeletonThickness.Row, on) end
+end)
 
 -- Visuals
 local crossT = mkToggle(VisualP,"Crosshair", Cross.Enabled, function(v) Cross.Enabled=v; updCross() end, "Shows or hides the custom crosshair overlay.")
