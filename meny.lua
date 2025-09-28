@@ -17,6 +17,8 @@ local TextService       = game:GetService("TextService")
 local LocalPlayer = Players.LocalPlayer
 local Camera      = workspace.CurrentCamera
 
+local trackedPlayers = {}
+
 -- forward-declare Root so click handlers can access it before it's created
 local Root
 
@@ -1382,6 +1384,7 @@ local ESP={
     TracerLines=false,
     TracerFrom="Bottom",
     TracerThickness=1.5,
+    UpdateInterval=0.05,
 }
 local Cross={
     Enabled=false,
@@ -1466,6 +1469,7 @@ local function hasLOS(part,char)
     return workspace:Raycast(origin, dir, rp)==nil
 end
 local function buildCandidate(pl, my, cx, cy)
+    if not (pl and pl.Parent) then return nil end
     if not isEnemy(pl) then return nil end
     local char = pl.Character
     if not char then return nil end
@@ -1514,7 +1518,7 @@ end
 local function getTarget()
     local my=LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart"); if not my then return nil end
     local cx,cy=Camera.ViewportSize.X/2, Camera.ViewportSize.Y/2; local best,bScore
-    for _,pl in ipairs(Players:GetPlayers()) do
+    for _,pl in ipairs(trackedPlayers) do
         local info = buildCandidate(pl, my, cx, cy)
         if info then
             local sc = scoreCandidate(info)
@@ -1900,30 +1904,65 @@ local function espTick(p)
         entry.Tracer.Visible = true
     end
 end
-RunService.RenderStepped:Connect(function()
-    for _,pl in ipairs(Players:GetPlayers()) do
-        espTick(pl)
+local espAccumulator = 0
+RunService.RenderStepped:Connect(function(dt)
+    espAccumulator += dt or 0
+    local interval = math.max(0.02, ESP.UpdateInterval or 0.05)
+    if espAccumulator < interval then
+        return
+    end
+    espAccumulator = 0
+    for i = #trackedPlayers, 1, -1 do
+        local pl = trackedPlayers[i]
+        if pl and pl.Parent then
+            espTick(pl)
+        else
+            table.remove(trackedPlayers, i)
+            if pl then
+                removeVisual(pl)
+            end
+        end
     end
 end)
-Players.PlayerAdded:Connect(function(p)
-    p.CharacterAdded:Connect(function()
+
+local function addTrackedPlayer(pl)
+    if pl == LocalPlayer then return end
+    for _,existing in ipairs(trackedPlayers) do
+        if existing == pl then
+            return
+        end
+    end
+    table.insert(trackedPlayers, pl)
+    pl.CharacterAdded:Connect(function()
         task.wait(0.2)
-        espTick(p)
+        espTick(pl)
     end)
-    p.CharacterRemoving:Connect(function()
-        hideVisual(espVisuals[p])
+    pl.CharacterRemoving:Connect(function()
+        hideVisual(espVisuals[pl])
     end)
-end)
-Players.PlayerRemoving:Connect(function(p)
-    removeVisual(p)
-end)
-for _,pl in ipairs(Players:GetPlayers()) do
-    if pl ~= LocalPlayer then
-        pl.CharacterRemoving:Connect(function()
-            hideVisual(espVisuals[pl])
-        end)
-    end
+    task.defer(function()
+        if pl.Parent then
+            espTick(pl)
+        end
+    end)
 end
+
+for _,pl in ipairs(Players:GetPlayers()) do
+    addTrackedPlayer(pl)
+end
+
+Players.PlayerAdded:Connect(addTrackedPlayer)
+
+Players.PlayerRemoving:Connect(function(pl)
+    if pl == LocalPlayer then return end
+    for i = #trackedPlayers, 1, -1 do
+        if trackedPlayers[i] == pl then
+            table.remove(trackedPlayers, i)
+            break
+        end
+    end
+    removeVisual(pl)
+end)
 
 --==================== PAGES & CONTROLS ====================--
 local AimbotP = newPage("Aimbot")
@@ -2038,9 +2077,12 @@ local tracerAnchor = mkCycle(EspExtras, "Tracer Anchor", {
     {label = "Screen Bottom", value = "Bottom"},
     {label = "Crosshair", value = "Crosshair"},
 }, ESP.TracerFrom or "Bottom", function(val) ESP.TracerFrom = val end, "Choose where tracers originate on your screen.")
+local refreshSlider = mkSlider(EspExtras, "Overlay Refresh Interval", 20, 200, (ESP.UpdateInterval or 0.05) * 1000, function(x)
+    ESP.UpdateInterval = math.clamp(x / 1000, 0.02, 0.35)
+end, "ms", "Sets how often the 2D overlay redraws. Higher values reduce client load.")
 
 if not drawingAvailable then
-    for _,control in ipairs({boxToggle, boxThickness, nameToggle, healthToggle, tracerToggle, tracerThickness, tracerAnchor}) do
+    for _,control in ipairs({boxToggle, boxThickness, nameToggle, healthToggle, tracerToggle, tracerThickness, tracerAnchor, refreshSlider}) do
         if control and control.Row then
             setInteractable(control.Row, false)
         end
@@ -2197,11 +2239,19 @@ local function formatDuration(seconds)
 end
 
 RunService.Heartbeat:Connect(function()
-    local count = 0
-    for _,pl in ipairs(Players:GetPlayers()) do
-        if pl ~= LocalPlayer then count += 1 end
+    local aliveCount = 0
+    for i = #trackedPlayers, 1, -1 do
+        local pl = trackedPlayers[i]
+        if pl and pl.Parent then
+            aliveCount += 1
+        else
+            table.remove(trackedPlayers, i)
+            if pl then
+                removeVisual(pl)
+            end
+        end
     end
-    metricPlayersValue.Text = tostring(count)
+    metricPlayersValue.Text = tostring(aliveCount)
 
     local uptime = os.time() - sessionStart
     local formatted = formatDuration(uptime)
@@ -2256,6 +2306,9 @@ local function killMenu()
     for _,pl in ipairs(Players:GetPlayers()) do
         local ch = pl.Character
         if ch then local h = ch:FindFirstChild("_HL_"); if h then pcall(function() h:Destroy() end) end end
+    end
+    for _,pl in ipairs(trackedPlayers) do
+        hideVisual(espVisuals[pl])
     end
 end
 
