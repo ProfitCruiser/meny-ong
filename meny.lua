@@ -13,6 +13,7 @@ local Players           = game:GetService("Players")
 local GuiService        = game:GetService("GuiService")
 local HttpService       = game:GetService("HttpService")
 local TextService       = game:GetService("TextService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
 
 local LocalPlayer = Players.LocalPlayer
 local Camera      = workspace.CurrentCamera
@@ -730,6 +731,7 @@ local AA={
     RequireRMB=false,
     WallCheck=true,
     DynamicPart=false,
+    UsePriorityMatrix=true,
     StickyAim=false,
     StickTime=0.35,
     AdaptiveSmoothing=false,
@@ -740,6 +742,24 @@ local AA={
     ReactionDelay=0,
     ReactionJitter=0,
     VerticalOffset=0,
+    VisibilityBias=0.35,
+    AutoSwap=true,
+    AutoSwapLoss=0.28,
+    Triggerbot=false,
+    TriggerRequireAim=true,
+    TriggerDelay=0.04,
+    TriggerHold=0.14,
+    SilentAim=false,
+    SilentRequireRMB=true,
+    SilentHitChance=1,
+    NoRecoil=false,
+    NoSpread=false,
+    HitMatrix={
+        {max=60, parts={"Head","UpperTorso","HumanoidRootPart","RightUpperArm","LeftUpperArm"}},
+        {max=160, parts={"Head","UpperTorso","HumanoidRootPart","LowerTorso","RightUpperArm","LeftUpperArm"}},
+        {max=320, parts={"UpperTorso","HumanoidRootPart","Head","LowerTorso","RightUpperArm","LeftUpperArm"}},
+        {max=math.huge, parts={"HumanoidRootPart","UpperTorso","Head","RightUpperArm","LeftUpperArm"}},
+    },
 }
 local ESP={
     Enabled=false,
@@ -753,6 +773,9 @@ local ESP={
     OutlineTransparency=0,
     ThroughWalls=true,
     ColorIntensity=1,
+    ShowSkeleton=false,
+    SkeletonOpacity=0.85,
+    SkeletonThickness=2.2,
 }
 local Cross={
     Enabled=false,
@@ -818,10 +841,36 @@ RunService.RenderStepped:Connect(updCross)
 
 -- Targeting helpers
 local function isEnemy(p) if p==LocalPlayer then return false end if LocalPlayer.Team and p.Team then return LocalPlayer.Team~=p.Team end return true end
-local function aimPart(c)
+local matrixFallbackOrder = {"Head","UpperTorso","HumanoidRootPart","LowerTorso","Torso","RightUpperArm","LeftUpperArm"}
+local visibilityRigParts = {"Head","UpperTorso","LowerTorso","HumanoidRootPart","RightUpperArm","LeftUpperArm","RightLowerArm","LeftLowerArm","RightUpperLeg","LeftUpperLeg"}
+
+local function matrixSelect(char, distance)
+    if not (char and distance) then return nil end
+    local matrix = AA.HitMatrix
+    if typeof(matrix) ~= "table" then return nil end
+    for _,entry in ipairs(matrix) do
+        local limit = entry.max or entry.range or entry.distance or math.huge
+        if distance <= limit then
+            for _,name in ipairs(entry.parts or entry.priority or {}) do
+                local part = char:FindFirstChild(name)
+                if part and part:IsA("BasePart") then
+                    return part
+                end
+            end
+            break
+        end
+    end
+    return nil
+end
+
+local function aimPart(c, distance)
     if not c then return nil end
     if AA.DynamicPart then
-        for _,name in ipairs({"Head","UpperTorso","HumanoidRootPart","Torso"}) do
+        if AA.UsePriorityMatrix then
+            local part = matrixSelect(c, distance)
+            if part then return part end
+        end
+        for _,name in ipairs(matrixFallbackOrder) do
             local part=c:FindFirstChild(name)
             if part and part:IsA("BasePart") then return part end
         end
@@ -830,31 +879,58 @@ local function aimPart(c)
     if not(p and p:IsA("BasePart")) then p=(c:FindFirstChild("UpperTorso") or c:FindFirstChild("HumanoidRootPart") or c:FindFirstChild("Head")) end
     return p
 end
-local function hasLOS(part,char)
-    if not AA.WallCheck then return true end
+local function hasLOS(part,char,forceCheck)
+    if not (part and char) then return false end
+    if not forceCheck and not AA.WallCheck then return true end
     local origin=Camera.CFrame.Position; local dir=(part.Position-origin)
     local rp=RaycastParams.new(); rp.FilterType=Enum.RaycastFilterType.Exclude; rp.FilterDescendantsInstances={LocalPlayer.Character, char}; rp.IgnoreWater=true
     return workspace:Raycast(origin, dir, rp)==nil
+end
+
+local function computeVisibilityRatio(char)
+    if not char then return 0 end
+    local origin = Camera.CFrame.Position
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = {LocalPlayer.Character, char}
+    params.IgnoreWater = true
+    local visible, total = 0, 0
+    for _,name in ipairs(visibilityRigParts) do
+        local part = char:FindFirstChild(name)
+        if part and part:IsA("BasePart") then
+            total += 1
+            local screen, on = Camera:WorldToViewportPoint(part.Position)
+            if on and screen.Z > 0 then
+                if not workspace:Raycast(origin, part.Position - origin, params) then
+                    visible += 1
+                end
+            end
+        end
+    end
+    if total == 0 then return 0 end
+    return visible / total
 end
 local function buildCandidate(pl, my, cx, cy)
     if not isEnemy(pl) then return nil end
     local char = pl.Character
     if not char then return nil end
-    local part = aimPart(char)
-    if not part then return nil end
     local hrp = char:FindFirstChild("HumanoidRootPart")
     if not hrp then return nil end
     local maxDist = math.max(0, AA.MaxDistance or 0)
     local minDist = math.clamp(AA.MinDistance or 0, 0, maxDist)
     local dist = (hrp.Position-my.Position).Magnitude
     if dist > maxDist or dist < minDist then return nil end
+    local part = aimPart(char, dist)
+    if not part then return nil end
     local sp,on = Camera:WorldToViewportPoint(part.Position)
     if not on then return nil end
     local dx,dy = sp.X-cx, sp.Y-cy
     local pd = (dx*dx+dy*dy)^0.5
     if pd>AA.FOVRadiusPx then return nil end
-    if not hasLOS(part, char) then return nil end
+    local los = hasLOS(part, char, true)
+    if AA.WallCheck and not los then return nil end
     local hum = char:FindFirstChildOfClass("Humanoid")
+    local visibility = computeVisibilityRatio(char)
     return {
         player = pl,
         character = char,
@@ -865,22 +941,35 @@ local function buildCandidate(pl, my, cx, cy)
         pixelDist = pd,
         screen = Vector2.new(sp.X, sp.Y),
         velocity = (hrp.AssemblyLinearVelocity or part.AssemblyLinearVelocity or Vector3.zero),
+        visibility = visibility,
+        hasLOS = los,
     }
 end
 local function scoreCandidate(info)
     local mode = AA.TargetSort or "Hybrid"
+    local base
     if mode == "Distance" then
-        return info.distance
+        base = info.distance
     elseif mode == "Health" then
         local hum = info.humanoid
-        if hum then return hum.Health end
-        return math.huge
+        if hum then
+            base = hum.Health
+        else
+            base = math.huge
+        end
     elseif mode == "Angle" then
-        return info.pixelDist
+        base = info.pixelDist
     else
         local w = math.clamp(AA.DistanceWeight or 0, 0, 0.25)
-        return info.pixelDist + info.distance * w
+        base = info.pixelDist + info.distance * w
     end
+    local bias = math.clamp(AA.VisibilityBias or 0, 0, 1)
+    if bias > 0 then
+        local visibility = math.clamp(info.visibility or 0, 0, 1)
+        local modifier = 1 - visibility * bias
+        base = base * math.clamp(modifier, 0.25, 1)
+    end
+    return base
 end
 local function getTarget()
     local my=LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart"); if not my then return nil end
@@ -900,6 +989,18 @@ end
 local stickyTarget, stickyTimer = nil, 0
 local rng = Random.new()
 local lastTargetPart, reactionTimer = nil, 0
+local activeTarget, activeAimPosition = nil, nil
+local osClock = os.clock
+
+local silentAimVector, silentAimTimestamp = nil, 0
+
+local triggerState = {
+    holding = false,
+    timer = 0,
+    lastFire = 0,
+}
+
+local lastSanitize = 0
 local function validateTarget(info)
     return info and info.part and info.part:IsDescendantOf(workspace)
 end
@@ -910,7 +1011,7 @@ local function refreshTarget(info)
     local char = player.Character
     if not char then return nil end
     info.character = char
-    info.part = info.part and info.part.Parent and info.part or aimPart(char)
+    info.part = info.part and info.part.Parent and info.part or aimPart(char, info.distance)
     if not info.part then return nil end
     info.hrp = char:FindFirstChild("HumanoidRootPart")
     if not info.hrp then return nil end
@@ -926,10 +1027,154 @@ local function refreshTarget(info)
     local cx,cy = Camera.ViewportSize.X/2, Camera.ViewportSize.Y/2
     local dx,dy = sp.X-cx, sp.Y-cy
     info.pixelDist = (dx*dx+dy*dy)^0.5
-    if AA.WallCheck and not hasLOS(info.part, char) then return nil end
+    local los = hasLOS(info.part, char, true)
+    if AA.WallCheck and not los then return nil end
+    info.hasLOS = los
     info.onScreen = on
     info.velocity = (info.hrp.AssemblyLinearVelocity or info.part.AssemblyLinearVelocity or Vector3.zero)
+    info.visibility = computeVisibilityRatio(char)
     return info
+end
+
+local function computeAimPosition(info)
+    if not info or not info.part then return nil end
+    local offset = Vector3.new(0, AA.VerticalOffset or 0, 0)
+    local targetPos = info.part.Position + offset
+    local pred = math.clamp(AA.Prediction or 0, 0, 1.5)
+    if pred > 0 then
+        targetPos = targetPos + (info.velocity or Vector3.zero) * pred
+    end
+    return targetPos
+end
+
+local function sendMouseClick(down)
+    local success = false
+    if down and mouse1press then
+        success = pcall(mouse1press)
+        if success then return true end
+    elseif (not down) and mouse1release and triggerState.holding then
+        success = pcall(mouse1release)
+        if success then return true end
+    end
+    if VirtualInputManager and VirtualInputManager.SendMouseButtonEvent then
+        local pos = UserInputService:GetMouseLocation()
+        local x, y = pos.X, pos.Y
+        success = pcall(function()
+            VirtualInputManager:SendMouseButtonEvent(x, y, 0, down, game, 0)
+        end)
+        return success == true
+    end
+    return success == true
+end
+
+local function pressTrigger()
+    if triggerState.holding then return end
+    if sendMouseClick(true) then
+        triggerState.holding = true
+        triggerState.timer = math.max(AA.TriggerHold or 0.12, 0)
+        triggerState.lastFire = osClock()
+    end
+end
+
+local function releaseTrigger()
+    if not triggerState.holding then return end
+    sendMouseClick(false)
+    triggerState.holding = false
+    triggerState.timer = 0
+end
+
+local function updateTrigger(dt, targetInfo, gateActive)
+    if triggerState.holding then
+        triggerState.timer = triggerState.timer - dt
+        if triggerState.timer <= 0 then
+            releaseTrigger()
+        end
+    end
+    if not (AA.Triggerbot and gateActive) then
+        if triggerState.holding then
+            releaseTrigger()
+        end
+        return
+    end
+    if targetInfo and targetInfo.hasLOS then
+        local now = osClock()
+        local delay = math.max(AA.TriggerDelay or 0, 0)
+        if (now - triggerState.lastFire) >= delay and not triggerState.holding then
+            pressTrigger()
+        end
+    else
+        if triggerState.holding then
+            releaseTrigger()
+        end
+    end
+end
+
+local function sanitizeAttributes(inst)
+    local ok, attrs = pcall(function()
+        return inst:GetAttributes()
+    end)
+    if not ok or not attrs then return end
+    for name, value in pairs(attrs) do
+        local lower = string.lower(name)
+        if AA.NoRecoil and lower:find("recoil") and typeof(value) == "number" then
+            pcall(function()
+                inst:SetAttribute(name, 0)
+            end)
+        elseif AA.NoSpread and (lower:find("spread") or lower:find("accuracy")) and typeof(value) == "number" then
+            pcall(function()
+                inst:SetAttribute(name, 0)
+            end)
+        end
+    end
+end
+
+local function trySetProperty(inst, property, value)
+    pcall(function()
+        local _ = inst[property]
+        inst[property] = value
+    end)
+end
+
+local function scrubInstance(inst)
+    if not inst then return end
+    local name = string.lower(inst.Name or "")
+    if AA.NoRecoil and name:find("recoil") then
+        if inst:IsA("NumberValue") or inst:IsA("IntValue") then
+            inst.Value = 0
+        elseif inst:IsA("Vector3Value") then
+            inst.Value = Vector3.new()
+        elseif inst:IsA("BoolValue") then
+            inst.Value = false
+        end
+    end
+    if AA.NoSpread and (name:find("spread") or name:find("accuracy")) then
+        if inst:IsA("NumberValue") or inst:IsA("IntValue") then
+            inst.Value = 0
+        elseif inst:IsA("Vector3Value") then
+            inst.Value = Vector3.new()
+        elseif inst:IsA("BoolValue") then
+            inst.Value = false
+        end
+    end
+    if AA.NoRecoil then
+        for _,prop in ipairs({"Recoil","RecoilMax","CameraRecoil","Kick","RecoilMin"}) do
+            trySetProperty(inst, prop, 0)
+        end
+    end
+    if AA.NoSpread then
+        for _,prop in ipairs({"Spread","BulletSpread","Accuracy","MaxSpread","MinSpread"}) do
+            trySetProperty(inst, prop, 0)
+        end
+    end
+    sanitizeAttributes(inst)
+end
+
+local function sanitizeTool(tool)
+    if not tool then return end
+    scrubInstance(tool)
+    for _,desc in ipairs(tool:GetDescendants()) do
+        scrubInstance(desc)
+    end
 end
 
 -- Main render
@@ -938,9 +1183,18 @@ RunService.RenderStepped:Connect(function(dt)
     FOV.Visible = (AA.Enabled and AA.ShowFOV)
     FOV.Size    = UDim2.fromOffset(fovRadius*2, fovRadius*2)
 
-    local aiming = AA.Enabled and (not AA.RequireRMB or UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2))
+    local rightMouseDown = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
+    local aimGate = (not AA.RequireRMB) or rightMouseDown
+    local silentGate = (not AA.SilentRequireRMB) or rightMouseDown
+    local triggerGate = (not AA.TriggerRequireAim) or aimGate
+
+    local wantTarget = (AA.Enabled and aimGate) or (AA.SilentAim and silentGate) or (AA.Triggerbot and triggerGate)
+    local candidate = wantTarget and getTarget() or nil
+
+    local aiming = AA.Enabled and aimGate
+    local targetInfo = nil
+
     if aiming then
-        local candidate = getTarget()
         if AA.StickyAim then
             if candidate then
                 stickyTarget = candidate
@@ -963,7 +1217,7 @@ RunService.RenderStepped:Connect(function(dt)
             end
         end
 
-        local targetInfo = stickyTarget or candidate
+        targetInfo = stickyTarget or candidate
         if targetInfo and not validateTarget(targetInfo) then
             targetInfo = nil
             if stickyTarget and not validateTarget(stickyTarget) then
@@ -987,26 +1241,25 @@ RunService.RenderStepped:Connect(function(dt)
                 reactionTimer = math.max(0, reactionTimer - dt)
             else
                 local pos = Camera.CFrame.Position
-                local targetPos = targetInfo.part.Position + Vector3.new(0, AA.VerticalOffset or 0, 0)
-                if AA.Prediction > 0 then
-                    targetPos = targetPos + targetInfo.velocity * math.clamp(AA.Prediction, 0, 1.5)
-                end
-                local des = CFrame.lookAt(pos, targetPos)
-                local alpha = math.clamp(AA.Strength + dt*0.5, 0, 1)
-                if AA.AdaptiveSmoothing then
-                    local normalized = 1 - math.clamp((targetInfo.distance or 0) / math.max(AA.MaxDistance, 1), 0, 1)
-                    alpha = math.clamp(alpha + normalized * AA.CloseRangeBoost, 0, 1)
-                end
-
-                local deadzone = math.max(0, AA.Deadzone or 0)
-                if deadzone > 0 then
-                    local closeness = (targetInfo.pixelDist - deadzone) / math.max(deadzone, 1)
-                    if closeness > 0 then
-                        local scale = math.clamp(closeness, 0.05, 1)
-                        Camera.CFrame = Camera.CFrame:Lerp(des, math.clamp(alpha * scale, 0, 1))
+                local targetPos = computeAimPosition(targetInfo)
+                if targetPos then
+                    local des = CFrame.lookAt(pos, targetPos)
+                    local alpha = math.clamp(AA.Strength + dt*0.5, 0, 1)
+                    if AA.AdaptiveSmoothing then
+                        local normalized = 1 - math.clamp((targetInfo.distance or 0) / math.max(AA.MaxDistance, 1), 0, 1)
+                        alpha = math.clamp(alpha + normalized * AA.CloseRangeBoost, 0, 1)
                     end
-                else
-                    Camera.CFrame = Camera.CFrame:Lerp(des, alpha)
+
+                    local deadzone = math.max(0, AA.Deadzone or 0)
+                    if deadzone > 0 then
+                        local closeness = (targetInfo.pixelDist - deadzone) / math.max(deadzone, 1)
+                        if closeness > 0 then
+                            local scale = math.clamp(closeness, 0.05, 1)
+                            Camera.CFrame = Camera.CFrame:Lerp(des, math.clamp(alpha * scale, 0, 1))
+                        end
+                    else
+                        Camera.CFrame = Camera.CFrame:Lerp(des, alpha)
+                    end
                 end
             end
         else
@@ -1014,12 +1267,277 @@ RunService.RenderStepped:Connect(function(dt)
             reactionTimer = 0
         end
     else
+        stickyTarget = nil
+        stickyTimer = 0
         lastTargetPart = nil
         reactionTimer = 0
     end
+
+    if not targetInfo then
+        targetInfo = candidate
+    end
+
+    if targetInfo and not validateTarget(targetInfo) then
+        targetInfo = nil
+    end
+
+    if targetInfo then
+        if targetInfo.hasLOS then
+            targetInfo.lastSeen = osClock()
+            targetInfo.losLost = nil
+        else
+            targetInfo.losLost = targetInfo.losLost or osClock()
+        end
+        if AA.AutoSwap then
+            if targetInfo.humanoid and targetInfo.humanoid.Health <= 0 then
+                targetInfo = nil
+            elseif targetInfo.losLost and (osClock() - targetInfo.losLost) >= math.max(AA.AutoSwapLoss or 0, 0) then
+                targetInfo = nil
+            end
+        end
+    end
+
+    if aiming and not targetInfo then
+        stickyTarget = nil
+        stickyTimer = 0
+        lastTargetPart = nil
+        reactionTimer = 0
+    end
+
+    activeTarget = targetInfo
+    activeAimPosition = computeAimPosition(activeTarget)
+
+    if AA.SilentAim then
+        if activeTarget and activeAimPosition and ((not AA.SilentRequireRMB) or rightMouseDown) then
+            local chance = math.clamp(AA.SilentHitChance or 0, 0, 1)
+            if chance > 0 then
+                if chance >= 1 or rng:NextNumber() <= chance then
+                    silentAimVector = activeAimPosition
+                    silentAimTimestamp = osClock()
+                end
+            end
+        else
+            silentAimVector = nil
+        end
+    else
+        silentAimVector = nil
+    end
+
+    if AA.NoRecoil or AA.NoSpread then
+        local now = osClock()
+        if now - lastSanitize >= 0.25 then
+            lastSanitize = now
+            local char = LocalPlayer.Character
+            local tool = char and char:FindFirstChildWhichIsA("Tool")
+            if tool then
+                sanitizeTool(tool)
+            end
+        end
+    end
+
+    updateTrigger(dt, activeTarget, triggerGate)
+
+    if activeTarget and activeTarget.hasLOS then
+        activeTarget.lastSeen = osClock()
+    end
 end)
 
+local function getSilentAimDirection(origin, direction)
+    if not (AA.SilentAim and silentAimVector) then return direction end
+    if (osClock() - silentAimTimestamp) > 0.25 then return direction end
+    if AA.SilentRequireRMB and not UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then return direction end
+    if not activeTarget or not validateTarget(activeTarget) then return direction end
+    if not activeTarget.hasLOS then return direction end
+    local offsetDirection = silentAimVector - origin
+    if offsetDirection.Magnitude <= 0 then return direction end
+    local mag = direction.Magnitude
+    if mag > 0 then
+        offsetDirection = offsetDirection.Unit * mag
+    end
+    return offsetDirection
+end
+
+do
+    local hm = hookmetamethod
+    local gnm = getnamecallmethod
+    local nc = newcclosure
+    if hm and gnm and nc then
+        local old
+        old = hm(game, "__namecall", nc(function(self, ...)
+            local method = gnm()
+            if self == workspace then
+                if method == "Raycast" then
+                    local args = {...}
+                    if typeof(args[1]) == "Vector3" and typeof(args[2]) == "Vector3" then
+                        local newDir = getSilentAimDirection(args[1], args[2])
+                        if newDir ~= args[2] then
+                            args[2] = newDir
+                            return old(self, table.unpack(args))
+                        end
+                    end
+                elseif method == "FindPartOnRayWithIgnoreList" or method == "FindPartOnRayWithWhitelist" or method == "FindPartOnRay" then
+                    local args = {...}
+                    local ray = args[1]
+                    if typeof(ray) == "Ray" then
+                        local newDir = getSilentAimDirection(ray.Origin, ray.Direction)
+                        if newDir ~= ray.Direction then
+                            args[1] = Ray.new(ray.Origin, newDir)
+                            return old(self, table.unpack(args))
+                        end
+                    end
+                end
+            end
+            return old(self, ...)
+        end))
+    end
+end
+
 -- ESP (Highlight)
+local SkeletonGui = Instance.new("ScreenGui")
+SkeletonGui.Name = "PC_Skeleton"
+SkeletonGui.IgnoreGuiInset = true
+SkeletonGui.ResetOnSpawn = false
+SkeletonGui.DisplayOrder = 43
+SkeletonGui.Parent = safeParent()
+
+local skeletonCache = {}
+
+local skeletonConnections = {
+    R15 = {
+        {"Head", "UpperTorso"},
+        {"UpperTorso", "LowerTorso"},
+        {"UpperTorso", "LeftUpperArm"},
+        {"LeftUpperArm", "LeftLowerArm"},
+        {"LeftLowerArm", "LeftHand"},
+        {"UpperTorso", "RightUpperArm"},
+        {"RightUpperArm", "RightLowerArm"},
+        {"RightLowerArm", "RightHand"},
+        {"LowerTorso", "LeftUpperLeg"},
+        {"LeftUpperLeg", "LeftLowerLeg"},
+        {"LeftLowerLeg", "LeftFoot"},
+        {"LowerTorso", "RightUpperLeg"},
+        {"RightUpperLeg", "RightLowerLeg"},
+        {"RightLowerLeg", "RightFoot"},
+    },
+    R6 = {
+        {"Head", "Torso"},
+        {"Torso", "Left Arm"},
+        {"Torso", "Right Arm"},
+        {"Torso", "Left Leg"},
+        {"Torso", "Right Leg"},
+    }
+}
+
+local function destroySkeleton(p)
+    local entry = skeletonCache[p]
+    if entry then
+        if entry.Container then
+            entry.Container:Destroy()
+        end
+        skeletonCache[p] = nil
+    end
+end
+
+local function ensureSkeletonEntry(p, rig)
+    local entry = skeletonCache[p]
+    local connections = skeletonConnections[rig]
+    if not connections then return nil end
+    if not entry or entry.Rig ~= rig or #entry.Lines ~= #connections then
+        if entry and entry.Container then
+            entry.Container:Destroy()
+        end
+        entry = {
+            Rig = rig,
+            Container = Instance.new("Frame"),
+            Lines = {},
+        }
+        local container = entry.Container
+        container.Name = p.Name .. "_Skeleton"
+        container.BackgroundTransparency = 1
+        container.BorderSizePixel = 0
+        container.Size = UDim2.fromScale(1, 1)
+        container.ZIndex = 50
+        container.Parent = SkeletonGui
+        for i = 1, #connections do
+            local line = Instance.new("Frame")
+            line.Name = "Bone" .. i
+            line.BorderSizePixel = 0
+            line.BackgroundTransparency = 1
+            line.AnchorPoint = Vector2.new(0.5, 0.5)
+            line.Visible = false
+            line.ZIndex = 50
+            line.Parent = container
+            entry.Lines[i] = line
+        end
+        skeletonCache[p] = entry
+    end
+    return entry
+end
+
+local function updateSkeleton(p, character, color, shouldShow)
+    if not shouldShow or not character then
+        local entry = skeletonCache[p]
+        if entry then
+            entry.Container.Visible = false
+            for _, line in ipairs(entry.Lines) do
+                line.Visible = false
+            end
+        end
+        return
+    end
+
+    local rig = character:FindFirstChild("UpperTorso") and "R15" or "R6"
+    local connections = skeletonConnections[rig]
+    if not connections then return end
+
+    local entry = ensureSkeletonEntry(p, rig)
+    if not entry then return end
+
+    local thickness = math.max(1, ESP.SkeletonThickness or 2)
+    local opacity = math.clamp(ESP.SkeletonOpacity or 0.8, 0, 1)
+    local tone = color or Color3.new(1, 1, 1)
+    local drawn = 0
+
+    for i, conn in ipairs(connections) do
+        local a = character:FindFirstChild(conn[1])
+        local b = character:FindFirstChild(conn[2])
+        local line = entry.Lines[i]
+        if line and a and b and a:IsA("BasePart") and b:IsA("BasePart") then
+            local pa, onA = Camera:WorldToViewportPoint(a.Position)
+            local pb, onB = Camera:WorldToViewportPoint(b.Position)
+            if (onA or onB) and (pa.Z > 0 or pb.Z > 0) then
+                local x1, y1 = pa.X, pa.Y
+                local x2, y2 = pb.X, pb.Y
+                local dx, dy = x2 - x1, y2 - y1
+                local len = (dx * dx + dy * dy) ^ 0.5
+                if len > 2 then
+                    local midX, midY = (x1 + x2) * 0.5, (y1 + y2) * 0.5
+                    line.Size = UDim2.fromOffset(len, thickness)
+                    line.Position = UDim2.fromOffset(midX, midY)
+                    line.Rotation = math.deg(math.atan2(dy, dx))
+                    line.BackgroundTransparency = 1 - opacity
+                    line.BackgroundColor3 = tone
+                    line.Visible = true
+                    drawn = drawn + 1
+                else
+                    line.Visible = false
+                end
+            else
+                line.Visible = false
+            end
+        elseif line then
+            line.Visible = false
+        end
+    end
+
+    entry.Container.Visible = drawn > 0
+    if drawn == 0 then
+        for _, line in ipairs(entry.Lines) do
+            line.Visible = false
+        end
+    end
+end
+
 local function hl(model)
     local h = model:FindFirstChild("_HL_")
     if not h then
@@ -1046,28 +1564,69 @@ local function tintESPColor(color)
 end
 local function espTick(p)
     if p==LocalPlayer then return end
-    local c=p.Character; if not c then return end
-    local h=hl(c); local show=ESP.Enabled
-    if show and ESP.EnemiesOnly then local e=isEnemyESP(p); show=(e==true) end
-    if show and ESP.UseDistance then show=distTo(c)<=ESP.MaxDistance end
-    h.Enabled=show; if not show then return end
-    h.DepthMode = ESP.ThroughWalls and Enum.HighlightDepthMode.AlwaysOnTop or Enum.HighlightDepthMode.Occluded
-    h.FillTransparency = math.clamp(ESP.FillTransparency, 0, 1)
-    h.OutlineTransparency = math.clamp(ESP.OutlineTransparency, 0, 1)
-    local e=isEnemyESP(p)
-    if e==true then
-        local col = tintESPColor(ESP.EnemyColor)
-        h.FillColor=col; h.OutlineColor=col
-    elseif e==false then
-        local col = tintESPColor(ESP.FriendColor)
-        h.FillColor=col; h.OutlineColor=col
-    else
-        local col = tintESPColor(ESP.NeutralColor)
-        h.FillColor=col; h.OutlineColor=col
+    local c=p.Character
+    if not c then
+        updateSkeleton(p, nil, nil, false)
+        return
     end
+
+    local enemyState = isEnemyESP(p)
+    local passes = true
+    if ESP.EnemiesOnly then
+        passes = enemyState == true
+    end
+    if passes and ESP.UseDistance then
+        passes = distTo(c) <= (ESP.MaxDistance or math.huge)
+    end
+
+    local color
+    if enemyState == true then
+        color = tintESPColor(ESP.EnemyColor)
+    elseif enemyState == false then
+        color = tintESPColor(ESP.FriendColor)
+    else
+        color = tintESPColor(ESP.NeutralColor)
+    end
+
+    local highlight = hl(c)
+    local showHighlight = ESP.Enabled and passes
+    highlight.Enabled = showHighlight
+    if showHighlight then
+        highlight.DepthMode = ESP.ThroughWalls and Enum.HighlightDepthMode.AlwaysOnTop or Enum.HighlightDepthMode.Occluded
+        highlight.FillTransparency = math.clamp(ESP.FillTransparency, 0, 1)
+        highlight.OutlineTransparency = math.clamp(ESP.OutlineTransparency, 0, 1)
+        highlight.FillColor = color
+        highlight.OutlineColor = color
+    end
+
+    local showSkeleton = passes and ESP.ShowSkeleton
+    updateSkeleton(p, c, color, showSkeleton)
 end
 RunService.RenderStepped:Connect(function() for _,pl in ipairs(Players:GetPlayers()) do espTick(pl) end end)
-Players.PlayerAdded:Connect(function(p) p.CharacterAdded:Connect(function() task.wait(0.2); espTick(p) end) end)
+
+local function bindPlayer(p)
+    p.CharacterAdded:Connect(function()
+        task.wait(0.2)
+        espTick(p)
+    end)
+    if p ~= LocalPlayer then
+        p.CharacterRemoving:Connect(function()
+            destroySkeleton(p)
+        end)
+    end
+end
+
+for _,pl in ipairs(Players:GetPlayers()) do
+    bindPlayer(pl)
+end
+
+Players.PlayerAdded:Connect(function(p)
+    bindPlayer(p)
+end)
+
+Players.PlayerRemoving:Connect(function(p)
+    destroySkeleton(p)
+end)
 
 --==================== PAGES & CONTROLS ====================--
 local AimbotP = newPage("Aimbot")
@@ -1113,9 +1672,13 @@ local targetPriority = mkCycle(AimbotP,"Target Priority", {
     {label="Lowest Health", value="Health"},
 }, AA.TargetSort, function(val) AA.TargetSort=val end, "Chooses how potential targets are ranked before aiming.")
 local distanceWeight = mkSlider(AimbotP,"Hybrid Distance Weight", 0, 0.08, AA.DistanceWeight, function(x) AA.DistanceWeight=x end,nil, "Adjusts how much distance influences the hybrid priority mode.")
+local visibilityBias = mkSlider(AimbotP,"Visibility Bias", 0, 1, AA.VisibilityBias, function(x) AA.VisibilityBias=x end,nil, "Weights target scores toward more visible rigs when sorting.")
 local dynamicPartToggle
 dynamicPartToggle = mkToggle(AimbotP,"Auto Bone Selection", AA.DynamicPart, function(v) AA.DynamicPart=v end, "Automatically chooses which body part to aim at based on target movement.")
+local matrixToggle = mkToggle(AimbotP,"Use Hit Priority Matrix", AA.UsePriorityMatrix, function(v) AA.UsePriorityMatrix=v end, "Switches auto bone selection to distance-weighted priorities for head/torso/arms.")
 local partCycle = mkCycle(AimbotP,"Manual Target Bone", {"Head","UpperTorso","HumanoidRootPart"}, AA.PartName, function(val) AA.PartName=val end, "Selects the specific body part to aim at when auto selection is disabled.")
+local autoSwapToggle = mkToggle(AimbotP,"Auto Target Swap", AA.AutoSwap, function(v) AA.AutoSwap=v end, "Automatically moves to a new target when the current one dies or hides for too long.")
+local autoSwapDelay = mkSlider(AimbotP,"LOS Swap Timeout", 0.05, 1.5, AA.AutoSwapLoss, function(x) AA.AutoSwapLoss=x end,"s", "How long to wait after losing sight before selecting a new target.")
 local stickyToggle = mkToggle(AimbotP,"Sticky Aim (keep last target)", AA.StickyAim, function(v)
     AA.StickyAim=v
     if not v then stickyTarget=nil; stickyTimer=0 end
@@ -1126,22 +1689,45 @@ local stickyDuration = mkSlider(AimbotP,"Sticky Duration", 0.1, 1.5, AA.StickTim
 end,"s", "How long sticky aim should hold onto the previous target.")
 local reactionDelay = mkSlider(AimbotP,"Reaction Delay", 0, 0.35, AA.ReactionDelay, function(x) AA.ReactionDelay=x end,"s", "Adds a delay before the aimbot begins to adjust toward a target.")
 local reactionJitter = mkSlider(AimbotP,"Reaction Jitter", 0, 0.3, AA.ReactionJitter, function(x) AA.ReactionJitter=x end,"s", "Adds random variation to the reaction delay for a more human feel.")
+local triggerToggle = mkToggle(AimbotP,"Triggerbot", AA.Triggerbot, function(v) AA.Triggerbot=v end, "Automatically fires when a valid target is inside the FOV and line-of-sight.")
+local triggerRMB = mkToggle(AimbotP,"Trigger requires RMB", AA.TriggerRequireAim, function(v) AA.TriggerRequireAim=v end, "Only allow the triggerbot to fire while holding right mouse (matches the aimbot gate).")
+local triggerDelay = mkSlider(AimbotP,"Trigger Delay", 0, 0.4, AA.TriggerDelay, function(x) AA.TriggerDelay=x end,"s", "Minimum time between triggerbot clicks.")
+local triggerHold = mkSlider(AimbotP,"Trigger Hold Time", 0.05, 0.5, AA.TriggerHold, function(x) AA.TriggerHold=x end,"s", "How long each triggerbot press stays held before releasing.")
 local adaptiveToggle = mkToggle(AimbotP,"Adaptive Smoothing Boost", AA.AdaptiveSmoothing, function(v) AA.AdaptiveSmoothing=v end, "Boosts smoothing strength as enemies move closer to you.")
 local closeBoost = mkSlider(AimbotP,"Close-range Boost", 0, 0.6, AA.CloseRangeBoost, function(x) AA.CloseRangeBoost=x end,nil, "Amount of extra smoothing applied when targets are nearby.")
 local predictionSlider = mkSlider(AimbotP,"Lead Prediction", 0, 0.75, AA.Prediction, function(x) AA.Prediction=x end,"s", "Predicts where moving targets will be after this many seconds.")
 local heightOffset = mkSlider(AimbotP,"Aim Height Offset", -2, 2, AA.VerticalOffset, function(x) AA.VerticalOffset=x end,"studs", "Shifts the aim point up or down relative to the target.")
+local silentToggle = mkToggle(AimbotP,"Silent Aim", AA.SilentAim, function(v) AA.SilentAim=v end, "Redirects hitscan checks to the active target without moving your camera.")
+local silentRMB = mkToggle(AimbotP,"Silent aim requires RMB", AA.SilentRequireRMB, function(v) AA.SilentRequireRMB=v end, "Only allow silent aim while holding right mouse.")
+local silentChance = mkSlider(AimbotP,"Silent Hit Chance", 0, 100, math.floor((AA.SilentHitChance or 0)*100), function(x) AA.SilentHitChance=math.clamp(x,0,100)/100 end,"%", "Percent chance that each shot will be redirected by silent aim.")
+local recoilToggle = mkToggle(AimbotP,"No Recoil", AA.NoRecoil, function(v) AA.NoRecoil=v end, "Continuously zeros out recoil-related values on equipped weapons.")
+local spreadToggle = mkToggle(AimbotP,"No Spread", AA.NoSpread, function(v) AA.NoSpread=v end, "Continuously zeros out spread/accuracy values on equipped weapons.")
 
 setInteractable(stickyDuration.Row, AA.StickyAim)
 setInteractable(closeBoost.Row, AA.AdaptiveSmoothing)
 if partCycle and partCycle.Row then setInteractable(partCycle.Row, not AA.DynamicPart) end
 if reactionJitter and reactionJitter.Row then setInteractable(reactionJitter.Row, (AA.ReactionDelay or 0) > 0) end
 if distanceWeight and distanceWeight.Row then setInteractable(distanceWeight.Row, (AA.TargetSort or "Hybrid") == "Hybrid") end
+if matrixToggle and matrixToggle.Row then setInteractable(matrixToggle.Row, AA.DynamicPart) end
+if autoSwapDelay and autoSwapDelay.Row then setInteractable(autoSwapDelay.Row, AA.AutoSwap) end
+if triggerRMB and triggerRMB.Row then setInteractable(triggerRMB.Row, AA.Triggerbot) end
+if triggerDelay and triggerDelay.Row then setInteractable(triggerDelay.Row, AA.Triggerbot) end
+if triggerHold and triggerHold.Row then setInteractable(triggerHold.Row, AA.Triggerbot) end
+if silentRMB and silentRMB.Row then setInteractable(silentRMB.Row, AA.SilentAim) end
+if silentChance and silentChance.Row then setInteractable(silentChance.Row, AA.SilentAim) end
 RunService.RenderStepped:Connect(function()
     setInteractable(stickyDuration.Row, AA.StickyAim)
     setInteractable(closeBoost.Row, AA.AdaptiveSmoothing)
     if partCycle and partCycle.Row then setInteractable(partCycle.Row, not AA.DynamicPart) end
     if reactionJitter and reactionJitter.Row then setInteractable(reactionJitter.Row, (AA.ReactionDelay or 0) > 0) end
     if distanceWeight and distanceWeight.Row then setInteractable(distanceWeight.Row, (AA.TargetSort or "Hybrid") == "Hybrid") end
+    if matrixToggle and matrixToggle.Row then setInteractable(matrixToggle.Row, AA.DynamicPart) end
+    if autoSwapDelay and autoSwapDelay.Row then setInteractable(autoSwapDelay.Row, AA.AutoSwap) end
+    if triggerRMB and triggerRMB.Row then setInteractable(triggerRMB.Row, AA.Triggerbot) end
+    if triggerDelay and triggerDelay.Row then setInteractable(triggerDelay.Row, AA.Triggerbot) end
+    if triggerHold and triggerHold.Row then setInteractable(triggerHold.Row, AA.Triggerbot) end
+    if silentRMB and silentRMB.Row then setInteractable(silentRMB.Row, AA.SilentAim) end
+    if silentChance and silentChance.Row then setInteractable(silentChance.Row, AA.SilentAim) end
 end)
 
 -- ESP
@@ -1156,6 +1742,15 @@ mkSlider(ESPP,"Color Intensity", 0.4, 1.6, ESP.ColorIntensity, function(x) ESP.C
 mkCycle(ESPP, "Enemy Highlight", ESPColorPresets, ESP.EnemyColor, function(col) ESP.EnemyColor = col end, "Choose the glow color used when enemies are highlighted.")
 mkCycle(ESPP, "Friendly Highlight", ESPColorPresets, ESP.FriendColor, function(col) ESP.FriendColor = col end, "Select the highlight tint for teammates and allies.")
 mkCycle(ESPP, "Neutral Highlight", ESPColorPresets, ESP.NeutralColor, function(col) ESP.NeutralColor = col end, "Pick the tone shown for players with no team alignment.")
+local skeletonToggle = mkToggle(ESPP,"Show Skeleton Overlay", ESP.ShowSkeleton, function(v) ESP.ShowSkeleton=v end, "Draws limb lines so each character is outlined as a skeleton.")
+local skeletonOpacity = mkSlider(ESPP,"Skeleton Opacity", 0.2, 1, ESP.SkeletonOpacity, function(x) ESP.SkeletonOpacity=x end,nil, "Controls how visible the skeleton lines appear.")
+local skeletonThickness = mkSlider(ESPP,"Skeleton Thickness", 1, 6, ESP.SkeletonThickness, function(x) ESP.SkeletonThickness=x end,"px", "Sets how thick each skeleton bone line is rendered.")
+
+RunService.RenderStepped:Connect(function()
+    local on = ESP.ShowSkeleton
+    if skeletonOpacity and skeletonOpacity.Row then setInteractable(skeletonOpacity.Row, on) end
+    if skeletonThickness and skeletonThickness.Row then setInteractable(skeletonThickness.Row, on) end
+end)
 
 -- Visuals
 local crossT = mkToggle(VisualP,"Crosshair", Cross.Enabled, function(v) Cross.Enabled=v; updCross() end, "Shows or hides the custom crosshair overlay.")
